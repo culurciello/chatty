@@ -1,5 +1,7 @@
 # Chatty Voice Agent
 
+![](images/demo1.png)
+
 A small Node.js app that opens a local website for real-time voice chat.
 
 - Speech-to-text runs in the browser with MoonshineJS.
