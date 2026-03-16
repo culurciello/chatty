@@ -1,12 +1,18 @@
-import * as Moonshine from "https://cdn.jsdelivr.net/npm/@moonshine-ai/moonshine-js@latest/dist/moonshine.min.js";
-
 const state = {
-  transcriber: null,
   listening: false,
   busy: false,
   history: [],
   activeAudio: null,
-  typingBubble: null
+  typingBubble: null,
+  spaceHeld: false,
+  micHeld: false,
+  language: "en",
+  sttProvider: "openai",
+  mediaRecorder: null,
+  mediaStream: null,
+  recordedChunks: [],
+  moonshineModule: null,
+  moonshineTranscriber: null
 };
 
 const ui = {
@@ -17,7 +23,27 @@ const ui = {
   chatBox: document.querySelector("#chatBox"),
   textInput: document.querySelector("#textInput"),
   sendBtn: document.querySelector("#sendBtn"),
-  stopAudioBtn: document.querySelector("#stopAudioBtn")
+  stopAudioBtn: document.querySelector("#stopAudioBtn"),
+  languageSelect: document.querySelector("#languageSelect"),
+  sttProviderSelect: document.querySelector("#sttProviderSelect")
+};
+
+const languageConfig = {
+  en: {
+    label: "English",
+    transcriptIdle: "Hold space to talk, or type a message.",
+    transcriptListening: "Listening in English... release to send."
+  },
+  it: {
+    label: "Italian",
+    transcriptIdle: "Tieni premuto spazio per parlare, oppure scrivi un messaggio.",
+    transcriptListening: "Ascolto in italiano... rilascia per inviare."
+  },
+  ko: {
+    label: "Korean",
+    transcriptIdle: "스페이스바를 누르고 말하거나, 직접 입력하세요.",
+    transcriptListening: "한국어로 듣는 중... 놓으면 전송합니다."
+  }
 };
 
 function describeMicError(error) {
@@ -62,8 +88,30 @@ function setState(nextState, detail = "") {
 
 function syncControls() {
   ui.micBtn.classList.toggle("active", state.listening);
-  ui.micBtn.title = state.listening ? "Stop listening" : "Start listening";
+  ui.micBtn.title = state.listening ? "Release to stop" : "Hold to talk";
   ui.sendBtn.disabled = state.busy;
+  ui.languageSelect.disabled = state.busy || state.listening;
+  ui.sttProviderSelect.disabled = state.busy || state.listening;
+}
+
+function currentLanguage() {
+  return languageConfig[state.language] || languageConfig.en;
+}
+
+function usingMoonshine() {
+  return state.sttProvider === "moonshine";
+}
+
+function isTypingTarget(target) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+
+  return (
+    target.tagName === "INPUT" ||
+    target.tagName === "TEXTAREA" ||
+    target.isContentEditable
+  );
 }
 
 function addBubble(text, role) {
@@ -161,7 +209,8 @@ async function sendMessage(message) {
       },
       body: JSON.stringify({
         transcript,
-        history: state.history
+        history: state.history,
+        language: state.language
       })
     });
 
@@ -193,72 +242,194 @@ async function sendMessage(message) {
   }
 }
 
-async function ensureTranscriber() {
-  if (state.transcriber) {
-    return state.transcriber;
+async function ensureRecorder() {
+  if (state.mediaRecorder && state.mediaStream) {
+    return state.mediaRecorder;
   }
 
-  setState("thinking", "loading moonshine");
-  ui.liveTranscript.textContent = "Loading local speech-to-text model...";
+  ui.liveTranscript.textContent = "Preparing microphone...";
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const preferredMimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+    ? "audio/webm;codecs=opus"
+    : "audio/webm";
+  const recorder = new MediaRecorder(stream, { mimeType: preferredMimeType });
 
-  state.transcriber = new Moonshine.MicrophoneTranscriber(
-    "model/tiny",
+  recorder.addEventListener("dataavailable", (event) => {
+    if (event.data && event.data.size > 0) {
+      state.recordedChunks.push(event.data);
+    }
+  });
+
+  state.mediaStream = stream;
+  state.mediaRecorder = recorder;
+  return recorder;
+}
+
+async function ensureMoonshineModule() {
+  if (state.moonshineModule) {
+    return state.moonshineModule;
+  }
+
+  state.moonshineModule = await import(
+    "https://cdn.jsdelivr.net/npm/@moonshine-ai/moonshine-js@latest/dist/moonshine.min.js"
+  );
+  return state.moonshineModule;
+}
+
+async function ensureMoonshineTranscriber() {
+  if (state.moonshineTranscriber) {
+    return state.moonshineTranscriber;
+  }
+
+  ui.liveTranscript.textContent = "Loading Moonshine STT...";
+  const Moonshine = await ensureMoonshineModule();
+  state.moonshineTranscriber = new Moonshine.MicrophoneTranscriber(
+    `model/tiny/${state.language}`,
     {
       onTranscriptionUpdated(text) {
         if (!state.busy) {
           setState("listening", "listening");
         }
-        ui.liveTranscript.textContent = text || "Listening...";
+        ui.liveTranscript.textContent = text || currentLanguage().transcriptListening;
         ui.textInput.value = text || "";
       },
       onTranscriptionCommitted(text) {
-        const committed = text?.trim();
-        ui.liveTranscript.textContent = committed || "Press the mic or type a message.";
-        ui.textInput.value = committed || "";
-        if (committed) {
-          void sendMessage(committed);
+        const transcript = typeof text === "string" ? text.trim() : "";
+        ui.liveTranscript.textContent = transcript || currentLanguage().transcriptIdle;
+        ui.textInput.value = transcript;
+        if (transcript) {
+          void sendMessage(transcript);
         }
       }
     },
     false
   );
 
-  return state.transcriber;
+  return state.moonshineTranscriber;
+}
+
+async function teardownMoonshine() {
+  if (!state.moonshineTranscriber) {
+    return;
+  }
+
+  try {
+    await state.moonshineTranscriber.stop();
+  } catch {
+    // Ignore stop errors during provider/language switching.
+  }
+
+  state.moonshineTranscriber = null;
+}
+
+async function transcribeRecordedAudio() {
+  if (!state.recordedChunks.length) {
+    ui.liveTranscript.textContent = currentLanguage().transcriptIdle;
+    return;
+  }
+
+  const mimeType = state.mediaRecorder?.mimeType || "audio/webm";
+  const audioBlob = new Blob(state.recordedChunks, { type: mimeType });
+  state.recordedChunks = [];
+
+  if (!audioBlob.size) {
+    ui.liveTranscript.textContent = currentLanguage().transcriptIdle;
+    return;
+  }
+
+  setState("thinking", "transcribing");
+  ui.liveTranscript.textContent = "Transcribing...";
+
+  const formData = new FormData();
+  formData.append("audio", audioBlob, "speech.webm");
+  formData.append("language", state.language);
+
+  const response = await fetch("/api/transcribe", {
+    method: "POST",
+    body: formData
+  });
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data?.details || data?.error || "Transcription failed.");
+  }
+
+  const transcript = typeof data?.transcript === "string" ? data.transcript.trim() : "";
+  ui.liveTranscript.textContent = transcript || currentLanguage().transcriptIdle;
+  ui.textInput.value = transcript;
+  if (transcript) {
+    await sendMessage(transcript);
+  }
 }
 
 async function startListening() {
   stopPlayback();
-  const transcriber = await ensureTranscriber();
-  await transcriber.start();
+  if (usingMoonshine()) {
+    const transcriber = await ensureMoonshineTranscriber();
+    await transcriber.start();
+  } else {
+    const recorder = await ensureRecorder();
+    if (recorder.state === "recording") {
+      return;
+    }
+
+    state.recordedChunks = [];
+    recorder.start();
+  }
+
   state.listening = true;
   syncControls();
   setState("listening", "listening");
-  ui.liveTranscript.textContent = "Listening...";
+  ui.liveTranscript.textContent = currentLanguage().transcriptListening;
 }
 
 async function stopListening() {
-  if (!state.transcriber) {
-    state.listening = false;
-    syncControls();
-    setState("idle", "idle");
-    return;
+  if (usingMoonshine()) {
+    if (state.moonshineTranscriber) {
+      await state.moonshineTranscriber.stop();
+    }
+  } else {
+    if (!state.mediaRecorder) {
+      state.listening = false;
+      syncControls();
+      setState("idle", "idle");
+      return;
+    }
+
+    const recorder = state.mediaRecorder;
+    if (recorder.state === "recording") {
+      await new Promise((resolve) => {
+        recorder.addEventListener("stop", resolve, { once: true });
+        recorder.stop();
+      });
+    }
   }
 
-  await state.transcriber.stop();
   state.listening = false;
   syncControls();
-  if (!state.busy && !state.activeAudio) {
+  if (!usingMoonshine()) {
+    await transcribeRecordedAudio();
+  }
+  if (!state.busy && !state.activeAudio && !state.listening) {
     setState("idle", "idle");
   }
 }
 
 ui.micBtn.addEventListener("click", async () => {
+  // Click is intentionally ignored because the mic is press-and-hold.
+});
+
+ui.micBtn.addEventListener("pointerdown", async (event) => {
+  event.preventDefault();
+  if (state.micHeld) {
+    return;
+  }
+
+  state.micHeld = true;
   ui.micBtn.disabled = true;
 
   try {
-    if (state.listening) {
-      await stopListening();
-    } else {
+    if (!state.listening) {
       await startListening();
     }
   } catch (error) {
@@ -271,12 +442,73 @@ ui.micBtn.addEventListener("click", async () => {
   }
 });
 
+async function releaseMicHold() {
+  if (!state.micHeld) {
+    return;
+  }
+
+  state.micHeld = false;
+  if (state.listening) {
+    await stopListening();
+  }
+}
+
+ui.micBtn.addEventListener("pointerup", () => {
+  void releaseMicHold();
+});
+
+ui.micBtn.addEventListener("pointerleave", () => {
+  void releaseMicHold();
+});
+
+ui.micBtn.addEventListener("pointercancel", () => {
+  void releaseMicHold();
+});
+
 ui.sendBtn.addEventListener("click", () => {
   void sendMessage(ui.textInput.value);
 });
 
 ui.stopAudioBtn.addEventListener("click", () => {
   stopPlayback();
+});
+
+ui.languageSelect.addEventListener("change", async (event) => {
+  const nextLanguage = event.target.value in languageConfig ? event.target.value : "en";
+  if (nextLanguage === state.language) {
+    return;
+  }
+
+  if (state.listening) {
+    await stopListening();
+  }
+
+  state.language = nextLanguage;
+  await teardownMoonshine();
+  ui.liveTranscript.textContent = currentLanguage().transcriptIdle;
+  addBubble(`Language set to ${currentLanguage().label}.`, "system");
+  syncControls();
+});
+
+ui.sttProviderSelect.addEventListener("change", async (event) => {
+  const nextProvider = event.target.value === "moonshine" ? "moonshine" : "openai";
+  if (nextProvider === state.sttProvider) {
+    return;
+  }
+
+  if (state.listening) {
+    await stopListening();
+  }
+
+  state.sttProvider = nextProvider;
+  if (nextProvider === "moonshine") {
+    addBubble("STT switched to Moonshine. Transcription runs in the browser.", "system");
+  } else {
+    await teardownMoonshine();
+    addBubble("STT switched to gpt-4o-mini-transcribe.", "system");
+  }
+  ui.liveTranscript.textContent = currentLanguage().transcriptIdle;
+  syncControls();
 });
 
 ui.textInput.addEventListener("keydown", (event) => {
@@ -286,9 +518,51 @@ ui.textInput.addEventListener("keydown", (event) => {
   }
 });
 
+document.addEventListener("keydown", (event) => {
+  if (
+    event.code !== "Space" ||
+    event.repeat ||
+    event.altKey ||
+    event.ctrlKey ||
+    event.metaKey ||
+    isTypingTarget(event.target)
+  ) {
+    return;
+  }
+
+  event.preventDefault();
+  if (state.spaceHeld) {
+    return;
+  }
+
+  state.spaceHeld = true;
+  void startListening().catch((error) => {
+    addBubble(describeMicError(error), "system");
+    state.listening = false;
+    state.spaceHeld = false;
+    syncControls();
+    setState("idle", "mic error");
+  });
+});
+
+document.addEventListener("keyup", (event) => {
+  if (event.code !== "Space" || isTypingTarget(event.target)) {
+    return;
+  }
+
+  if (!state.spaceHeld) {
+    return;
+  }
+
+  event.preventDefault();
+  state.spaceHeld = false;
+  void stopListening();
+});
+
 addBubble(
-  "Moonshine transcribes locally in the browser. OpenAI generates and speaks the reply.",
+  "Hold space to talk. Choose Moonshine or gpt-4o-mini-transcribe for speech-to-text.",
   "system"
 );
 setState("idle", "idle");
+ui.liveTranscript.textContent = currentLanguage().transcriptIdle;
 syncControls();

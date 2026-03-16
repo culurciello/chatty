@@ -381,6 +381,34 @@ body::before {
   flex-wrap: wrap;
 }
 
+.controls-row {
+  margin-top: 0;
+  margin-bottom: 12px;
+}
+
+.language-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 13px;
+}
+
+.language-select {
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  padding: 10px 14px;
+  color: white;
+  font-size: 14px;
+  font-family: "Inter", sans-serif;
+  outline: none;
+}
+
+.language-select:disabled {
+  opacity: 0.5;
+}
+
 .text-input {
   flex: 1 1 220px;
   background: rgba(255, 255, 255, 0.07);

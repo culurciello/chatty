@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import express from "express";
+import multer from "multer";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -14,11 +15,19 @@ const host = process.env.HOST || "127.0.0.1";
 const openAiApiKey = process.env.OPENAI_API_KEY;
 const chatModel = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
 const speechModel = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
+const transcriptionModel =
+  process.env.OPENAI_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
 const speechVoice = process.env.OPENAI_TTS_VOICE || "alloy";
 const systemPrompt =
   process.env.SYSTEM_PROMPT ||
   "You are a concise, helpful voice assistant. Reply conversationally and keep answers brief unless the user asks for more detail.";
 const startedAt = new Date().toISOString();
+const supportedLanguages = {
+  en: "English",
+  it: "Italian",
+  ko: "Korean"
+};
+const upload = multer({ storage: multer.memoryStorage() });
 
 function logEvent(stage, details = "") {
   const suffix = details ? ` ${details}` : "";
@@ -34,9 +43,79 @@ app.get("/api/health", (_req, res) => {
     ok: true,
     configured: Boolean(openAiApiKey),
     chatModel,
+    transcriptionModel,
     speechModel,
     speechVoice
   });
+});
+
+app.post("/api/transcribe", upload.single("audio"), async (req, res) => {
+  if (!openAiApiKey) {
+    logEvent("config_error", "OPENAI_API_KEY is missing");
+    return res.status(500).json({
+      error: "OPENAI_API_KEY is missing. Add it to .env before using the app."
+    });
+  }
+
+  if (!req.file?.buffer?.length) {
+    logEvent("request_rejected", "missing audio upload");
+    return res.status(400).json({ error: "Audio upload is required." });
+  }
+
+  const languageCode =
+    typeof req.body?.language === "string" && req.body.language in supportedLanguages
+      ? req.body.language
+      : "en";
+
+  try {
+    logEvent(
+      "transcription_start",
+      `model=${transcriptionModel} language=${languageCode} bytes=${req.file.buffer.length}`
+    );
+
+    const formData = new FormData();
+    formData.append(
+      "file",
+      new Blob([req.file.buffer], { type: req.file.mimetype || "audio/webm" }),
+      req.file.originalname || "speech.webm"
+    );
+    formData.append("model", transcriptionModel);
+    formData.append("language", languageCode);
+    formData.append("response_format", "text");
+
+    const transcriptionResponse = await fetch(
+      "https://api.openai.com/v1/audio/transcriptions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${openAiApiKey}`
+        },
+        body: formData
+      }
+    );
+
+    if (!transcriptionResponse.ok) {
+      const errorText = await transcriptionResponse.text();
+      logEvent("transcription_error", `status=${transcriptionResponse.status}`);
+      return res.status(transcriptionResponse.status).json({
+        error: "OpenAI transcription request failed.",
+        details: errorText
+      });
+    }
+
+    const transcript = (await transcriptionResponse.text()).trim();
+    logEvent("transcription_done", `chars=${transcript.length}`);
+    return res.json({ transcript });
+  } catch (error) {
+    logEvent(
+      "transcription_error",
+      error instanceof Error ? error.message : String(error)
+    );
+    return res.status(500).json({
+      error: "Unexpected transcription error.",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
 });
 
 app.post("/api/voice-chat", async (req, res) => {
@@ -49,17 +128,28 @@ app.post("/api/voice-chat", async (req, res) => {
 
   const transcript = typeof req.body?.transcript === "string" ? req.body.transcript.trim() : "";
   const history = Array.isArray(req.body?.history) ? req.body.history : [];
+  const languageCode =
+    typeof req.body?.language === "string" && req.body.language in supportedLanguages
+      ? req.body.language
+      : "en";
+  const languageLabel = supportedLanguages[languageCode];
 
   if (!transcript) {
     logEvent("request_rejected", "empty transcript");
     return res.status(400).json({ error: "Transcript is required." });
   }
 
-  logEvent("listening_complete", `transcript="${transcript.slice(0, 120)}"`);
-  logEvent("processing_text", `history_items=${history.length}`);
+  logEvent(
+    "listening_complete",
+    `transcript="${transcript.slice(0, 120)}" language=${languageCode}`
+  );
+  logEvent("processing_text", `history_items=${history.length} language=${languageCode}`);
 
   const messages = [
-    { role: "system", content: systemPrompt },
+    {
+      role: "system",
+      content: `${systemPrompt} Always reply in ${languageLabel} unless the user explicitly asks to switch languages.`
+    },
     ...history
       .filter((item) => item && typeof item.role === "string" && typeof item.content === "string")
       .slice(-12),
