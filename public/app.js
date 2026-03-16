@@ -8,14 +8,19 @@ const state = {
   micHeld: false,
   language: "en",
   sttProvider: "openai",
+  conversationMode: "push_to_talk",
+  autoResumeListening: false,
   mediaRecorder: null,
   mediaStream: null,
   recordedChunks: [],
   moonshineModule: null,
   moonshineTranscriber: null,
   transcribingChunk: false,
-  conversationMode: "push_to_talk",
-  autoResumeListening: false
+  pendingMessages: [],
+  realtimePeerConnection: null,
+  realtimeDataChannel: null,
+  realtimeStream: null,
+  realtimePartialByItemId: new Map()
 };
 
 const ui = {
@@ -90,22 +95,6 @@ function setState(nextState, detail = "") {
   ui.status.className = `status${nextState !== "idle" ? " active" : ""}`;
 }
 
-function syncControls() {
-  ui.micBtn.classList.toggle("active", state.listening);
-  ui.micBtn.title =
-    state.conversationMode === "realtime"
-      ? state.listening
-        ? "Stop listening"
-        : "Start listening"
-      : state.listening
-        ? "Release to stop"
-        : "Hold to talk";
-  ui.sendBtn.disabled = state.busy;
-  ui.languageSelect.disabled = state.busy || state.listening;
-  ui.sttProviderSelect.disabled = state.busy || state.listening;
-  ui.conversationModeSelect.disabled = state.busy || state.listening;
-}
-
 function currentLanguage() {
   return languageConfig[state.language] || languageConfig.en;
 }
@@ -118,6 +107,10 @@ function usingRealtimeMode() {
   return state.conversationMode === "realtime";
 }
 
+function usingOpenAiRealtimeStt() {
+  return !usingMoonshine() && usingRealtimeMode();
+}
+
 function currentIdlePrompt() {
   return usingRealtimeMode()
     ? "Click the mic to start live listening, or type a message."
@@ -125,9 +118,27 @@ function currentIdlePrompt() {
 }
 
 function currentListeningPrompt() {
-  return usingRealtimeMode()
-    ? currentLanguage().transcriptListening.replace("... release to send.", "...")
-    : currentLanguage().transcriptListening;
+  if (usingRealtimeMode()) {
+    return currentLanguage().transcriptListening.replace("... release to send.", "...");
+  }
+
+  return currentLanguage().transcriptListening;
+}
+
+function syncControls() {
+  ui.micBtn.classList.toggle("active", state.listening);
+  ui.micBtn.title =
+    usingRealtimeMode()
+      ? state.listening
+        ? "Stop listening"
+        : "Start listening"
+      : state.listening
+        ? "Release to stop"
+        : "Hold to talk";
+  ui.sendBtn.disabled = state.busy;
+  ui.languageSelect.disabled = state.busy || state.listening;
+  ui.sttProviderSelect.disabled = state.busy || state.listening;
+  ui.conversationModeSelect.disabled = state.busy || state.listening;
 }
 
 function isTypingTarget(target) {
@@ -185,6 +196,32 @@ function stopPlayback() {
   }
 }
 
+function enqueueMessage(message) {
+  const transcript = message.trim();
+  if (!transcript) {
+    return;
+  }
+
+  state.pendingMessages.push(transcript);
+  void drainMessageQueue();
+}
+
+async function drainMessageQueue() {
+  if (state.busy || !state.pendingMessages.length) {
+    return;
+  }
+
+  const nextMessage = state.pendingMessages.shift();
+  if (!nextMessage) {
+    return;
+  }
+
+  await sendMessage(nextMessage);
+  if (state.pendingMessages.length) {
+    void drainMessageQueue();
+  }
+}
+
 async function playAssistantAudio(audioBase64, mimeType) {
   if (usingRealtimeMode() && state.listening) {
     state.autoResumeListening = true;
@@ -199,19 +236,25 @@ async function playAssistantAudio(audioBase64, mimeType) {
   state.activeAudio = audio;
   setState("speaking", "speaking");
 
+  const resumeIfNeeded = () => {
+    if (!state.autoResumeListening) {
+      setState("idle", "idle");
+      ui.liveTranscript.textContent = currentIdlePrompt();
+      return;
+    }
+
+    state.autoResumeListening = false;
+    void startListening().catch((error) => {
+      addBubble(describeMicError(error), "system");
+      setState("idle", "mic error");
+    });
+  };
+
   audio.addEventListener("ended", () => {
     if (state.activeAudio === audio) {
       state.activeAudio = null;
     }
-    if (state.autoResumeListening) {
-      state.autoResumeListening = false;
-      void startListening().catch((error) => {
-        addBubble(describeMicError(error), "system");
-        setState("idle", "mic error");
-      });
-      return;
-    }
-    setState("idle", "idle");
+    resumeIfNeeded();
   });
 
   audio.addEventListener("error", () => {
@@ -219,15 +262,7 @@ async function playAssistantAudio(audioBase64, mimeType) {
       state.activeAudio = null;
     }
     addBubble("Audio playback failed in the browser.", "system");
-    if (state.autoResumeListening) {
-      state.autoResumeListening = false;
-      void startListening().catch((error) => {
-        addBubble(describeMicError(error), "system");
-        setState("idle", "mic error");
-      });
-      return;
-    }
-    setState("idle", "audio error");
+    resumeIfNeeded();
   });
 
   await audio.play();
@@ -279,12 +314,9 @@ async function sendMessage(message) {
   } finally {
     state.busy = false;
     syncControls();
-    if (!state.activeAudio) {
-      if (state.listening) {
-        setState("listening", "listening");
-      } else {
-        setState("idle", "idle");
-      }
+    if (!state.activeAudio && !state.listening) {
+      setState("idle", "idle");
+      ui.liveTranscript.textContent = currentIdlePrompt();
     }
   }
 }
@@ -295,19 +327,27 @@ async function ensureRecorder() {
   }
 
   ui.liveTranscript.textContent = "Preparing microphone...";
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    }
+  });
   const preferredMimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
     ? "audio/webm;codecs=opus"
     : "audio/webm";
   const recorder = new MediaRecorder(stream, { mimeType: preferredMimeType });
 
   recorder.addEventListener("dataavailable", (event) => {
-    if (event.data && event.data.size > 0) {
-      if (usingRealtimeMode()) {
-        void transcribeChunk(event.data);
-      } else {
-        state.recordedChunks.push(event.data);
-      }
+    if (!event.data || event.data.size === 0) {
+      return;
+    }
+
+    if (usingRealtimeMode()) {
+      void transcribeChunk(event.data);
+    } else {
+      state.recordedChunks.push(event.data);
     }
   });
 
@@ -341,15 +381,15 @@ async function ensureMoonshineTranscriber() {
         if (!state.busy) {
           setState("listening", "listening");
         }
-        ui.liveTranscript.textContent = text || currentLanguage().transcriptListening;
+        ui.liveTranscript.textContent = text || currentListeningPrompt();
         ui.textInput.value = text || "";
       },
       onTranscriptionCommitted(text) {
         const transcript = typeof text === "string" ? text.trim() : "";
-        ui.liveTranscript.textContent = transcript || currentLanguage().transcriptIdle;
+        ui.liveTranscript.textContent = transcript || currentIdlePrompt();
         ui.textInput.value = transcript;
         if (transcript) {
-          void sendMessage(transcript);
+          enqueueMessage(transcript);
         }
       }
     },
@@ -374,12 +414,7 @@ async function teardownMoonshine() {
 }
 
 async function transcribeChunk(audioBlob) {
-  if (!audioBlob || !audioBlob.size) {
-    ui.liveTranscript.textContent = currentLanguage().transcriptIdle;
-    return;
-  }
-
-  if (state.transcribingChunk) {
+  if (!audioBlob || !audioBlob.size || state.transcribingChunk) {
     return;
   }
 
@@ -408,7 +443,7 @@ async function transcribeChunk(audioBlob) {
     ui.liveTranscript.textContent = transcript || currentIdlePrompt();
     ui.textInput.value = transcript;
     if (transcript) {
-      await sendMessage(transcript);
+      enqueueMessage(transcript);
     }
   } finally {
     state.transcribingChunk = false;
@@ -419,11 +454,170 @@ async function transcribeChunk(audioBlob) {
   }
 }
 
+async function fetchRealtimeSessionSecret() {
+  const response = await fetch("/api/realtime-transcription-session", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ language: state.language })
+  });
+
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data?.details?.error?.message || data?.error || "Failed to create realtime session.");
+  }
+
+  const secret =
+    data?.value ||
+    data?.client_secret?.value ||
+    data?.session?.client_secret?.value;
+
+  if (!secret) {
+    throw new Error("Realtime session response did not include a client secret.");
+  }
+
+  return secret;
+}
+
+function handleRealtimeEvent(event) {
+  switch (event.type) {
+    case "input_audio_buffer.speech_started":
+      if (!state.busy) {
+        setState("listening", "speech detected");
+      }
+      break;
+    case "input_audio_buffer.speech_stopped":
+      if (!state.busy) {
+        setState("thinking", "finalizing speech");
+      }
+      break;
+    case "conversation.item.input_audio_transcription.delta": {
+      const itemId = event.item_id || event.item?.id || "default";
+      const previous = state.realtimePartialByItemId.get(itemId) || "";
+      const next = previous + (event.delta || "");
+      state.realtimePartialByItemId.set(itemId, next);
+      ui.liveTranscript.textContent = next || currentListeningPrompt();
+      ui.textInput.value = next;
+      break;
+    }
+    case "conversation.item.input_audio_transcription.completed": {
+      const itemId = event.item_id || event.item?.id || "default";
+      const transcript = (event.transcript || state.realtimePartialByItemId.get(itemId) || "").trim();
+      state.realtimePartialByItemId.delete(itemId);
+      ui.liveTranscript.textContent = transcript || currentListeningPrompt();
+      ui.textInput.value = transcript;
+      if (transcript) {
+        enqueueMessage(transcript);
+      }
+      break;
+    }
+    case "conversation.item.input_audio_transcription.failed":
+      addBubble("Realtime transcription failed.", "system");
+      break;
+    default:
+      break;
+  }
+}
+
+async function ensureOpenAiRealtimeConnection() {
+  if (state.realtimePeerConnection && state.realtimeDataChannel?.readyState !== "closed") {
+    return;
+  }
+
+  ui.liveTranscript.textContent = "Connecting realtime transcription...";
+
+  const secret = await fetchRealtimeSessionSecret();
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    }
+  });
+
+  const peerConnection = new RTCPeerConnection();
+  const dataChannel = peerConnection.createDataChannel("oai-events");
+
+  dataChannel.addEventListener("message", (messageEvent) => {
+    try {
+      const event = JSON.parse(messageEvent.data);
+      handleRealtimeEvent(event);
+    } catch {
+      // Ignore malformed events.
+    }
+  });
+
+  for (const track of stream.getTracks()) {
+    peerConnection.addTrack(track, stream);
+  }
+
+  const offer = await peerConnection.createOffer();
+  await peerConnection.setLocalDescription(offer);
+
+  const response = await fetch("https://api.openai.com/v1/realtime/calls", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${secret}`,
+      "Content-Type": "application/sdp"
+    },
+    body: offer.sdp
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Realtime WebRTC setup failed: ${errorText}`);
+  }
+
+  const answerSdp = await response.text();
+  await peerConnection.setRemoteDescription({
+    type: "answer",
+    sdp: answerSdp
+  });
+
+  state.realtimePeerConnection = peerConnection;
+  state.realtimeDataChannel = dataChannel;
+  state.realtimeStream = stream;
+  state.realtimePartialByItemId.clear();
+}
+
+async function teardownOpenAiRealtimeConnection() {
+  if (state.realtimeDataChannel) {
+    try {
+      state.realtimeDataChannel.close();
+    } catch {
+      // Ignore close errors.
+    }
+  }
+
+  if (state.realtimePeerConnection) {
+    try {
+      state.realtimePeerConnection.close();
+    } catch {
+      // Ignore close errors.
+    }
+  }
+
+  if (state.realtimeStream) {
+    for (const track of state.realtimeStream.getTracks()) {
+      track.stop();
+    }
+  }
+
+  state.realtimePeerConnection = null;
+  state.realtimeDataChannel = null;
+  state.realtimeStream = null;
+  state.realtimePartialByItemId.clear();
+}
+
 async function startListening() {
   stopPlayback();
+
   if (usingMoonshine()) {
     const transcriber = await ensureMoonshineTranscriber();
     await transcriber.start();
+  } else if (usingOpenAiRealtimeStt()) {
+    await ensureOpenAiRealtimeConnection();
   } else {
     const recorder = await ensureRecorder();
     if (recorder.state === "recording") {
@@ -431,11 +625,7 @@ async function startListening() {
     }
 
     state.recordedChunks = [];
-    if (usingRealtimeMode()) {
-      recorder.start(2500);
-    } else {
-      recorder.start();
-    }
+    recorder.start(usingRealtimeMode() ? 2500 : undefined);
   }
 
   state.listening = true;
@@ -449,11 +639,14 @@ async function stopListening() {
     if (state.moonshineTranscriber) {
       await state.moonshineTranscriber.stop();
     }
+  } else if (usingOpenAiRealtimeStt()) {
+    await teardownOpenAiRealtimeConnection();
   } else {
     if (!state.mediaRecorder) {
       state.listening = false;
       syncControls();
       setState("idle", "idle");
+      ui.liveTranscript.textContent = currentIdlePrompt();
       return;
     }
 
@@ -468,12 +661,14 @@ async function stopListening() {
 
   state.listening = false;
   syncControls();
+
   if (!usingMoonshine() && !usingRealtimeMode()) {
     const mimeType = state.mediaRecorder?.mimeType || "audio/webm";
     const audioBlob = new Blob(state.recordedChunks, { type: mimeType });
     state.recordedChunks = [];
     await transcribeChunk(audioBlob);
   }
+
   if (!state.busy && !state.activeAudio) {
     setState("idle", "idle");
     ui.liveTranscript.textContent = currentIdlePrompt();
@@ -486,6 +681,7 @@ ui.micBtn.addEventListener("click", () => {
   }
 
   ui.micBtn.disabled = true;
+
   const work = async () => {
     if (state.listening) {
       await stopListening();
@@ -566,7 +762,7 @@ ui.micBtn.addEventListener("pointercancel", () => {
 });
 
 ui.sendBtn.addEventListener("click", () => {
-  void sendMessage(ui.textInput.value);
+  enqueueMessage(ui.textInput.value);
 });
 
 ui.stopAudioBtn.addEventListener("click", () => {
@@ -585,7 +781,8 @@ ui.languageSelect.addEventListener("change", async (event) => {
 
   state.language = nextLanguage;
   await teardownMoonshine();
-  ui.liveTranscript.textContent = currentLanguage().transcriptIdle;
+  await teardownOpenAiRealtimeConnection();
+  ui.liveTranscript.textContent = currentIdlePrompt();
   addBubble(`Language set to ${currentLanguage().label}.`, "system");
   syncControls();
 });
@@ -601,13 +798,18 @@ ui.sttProviderSelect.addEventListener("change", async (event) => {
   }
 
   state.sttProvider = nextProvider;
-  if (nextProvider === "moonshine") {
-    addBubble("STT switched to Moonshine. Transcription runs in the browser.", "system");
-  } else {
-    await teardownMoonshine();
-    addBubble("STT switched to gpt-4o-mini-transcribe.", "system");
-  }
-  ui.liveTranscript.textContent = currentLanguage().transcriptIdle;
+  await teardownMoonshine();
+  await teardownOpenAiRealtimeConnection();
+
+  addBubble(
+    nextProvider === "moonshine"
+      ? "STT switched to Moonshine. Transcription runs in the browser."
+      : usingRealtimeMode()
+        ? "STT switched to OpenAI Realtime transcription with VAD."
+        : "STT switched to gpt-4o-mini-transcribe.",
+    "system"
+  );
+  ui.liveTranscript.textContent = currentIdlePrompt();
   syncControls();
 });
 
@@ -622,9 +824,12 @@ ui.conversationModeSelect.addEventListener("change", async (event) => {
   }
 
   state.conversationMode = nextMode;
+  await teardownOpenAiRealtimeConnection();
   addBubble(
     nextMode === "realtime"
-      ? "Mode switched to real-time free speech."
+      ? usingMoonshine()
+        ? "Mode switched to real-time free speech."
+        : "Mode switched to real-time free speech with OpenAI Realtime transcription + VAD."
       : "Mode switched to push to talk.",
     "system"
   );
@@ -635,7 +840,7 @@ ui.conversationModeSelect.addEventListener("change", async (event) => {
 ui.textInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
-    void sendMessage(ui.textInput.value);
+    enqueueMessage(ui.textInput.value);
   }
 });
 
@@ -682,7 +887,7 @@ document.addEventListener("keyup", (event) => {
 });
 
 addBubble(
-  "Choose push to talk or real-time free speech, and choose Moonshine or gpt-4o-mini-transcribe for speech-to-text.",
+  "Choose push to talk or real-time free speech. OpenAI real-time mode uses Realtime transcription + VAD.",
   "system"
 );
 setState("idle", "idle");

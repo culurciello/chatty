@@ -28,6 +28,8 @@ const supportedLanguages = {
   ko: "Korean"
 };
 const upload = multer({ storage: multer.memoryStorage() });
+const realtimeTranscriptionModel =
+  process.env.OPENAI_REALTIME_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
 
 function logEvent(stage, details = "") {
   const suffix = details ? ` ${details}` : "";
@@ -44,9 +46,85 @@ app.get("/api/health", (_req, res) => {
     configured: Boolean(openAiApiKey),
     chatModel,
     transcriptionModel,
+    realtimeTranscriptionModel,
     speechModel,
     speechVoice
   });
+});
+
+app.post("/api/realtime-transcription-session", async (req, res) => {
+  if (!openAiApiKey) {
+    logEvent("config_error", "OPENAI_API_KEY is missing");
+    return res.status(500).json({
+      error: "OPENAI_API_KEY is missing. Add it to .env before using the app."
+    });
+  }
+
+  const languageCode =
+    typeof req.body?.language === "string" && req.body.language in supportedLanguages
+      ? req.body.language
+      : "en";
+
+  const sessionConfig = {
+    session: {
+      type: "transcription",
+      audio: {
+        input: {
+          noise_reduction: {
+            type: "near_field"
+          },
+          transcription: {
+            model: realtimeTranscriptionModel,
+            language: languageCode
+          },
+          turn_detection: {
+            type: "server_vad",
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 500
+          }
+        }
+      }
+    }
+  };
+
+  try {
+    logEvent(
+      "realtime_session_start",
+      `model=${realtimeTranscriptionModel} language=${languageCode}`
+    );
+
+    const response = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${openAiApiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(sessionConfig)
+    });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      logEvent("realtime_session_error", `status=${response.status}`);
+      return res.status(response.status).json({
+        error: "Failed to create realtime transcription session.",
+        details: data
+      });
+    }
+
+    logEvent("realtime_session_ready", `language=${languageCode}`);
+    return res.json(data);
+  } catch (error) {
+    logEvent(
+      "realtime_session_error",
+      error instanceof Error ? error.message : String(error)
+    );
+    return res.status(500).json({
+      error: "Unexpected realtime session error.",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
 });
 
 app.post("/api/transcribe", upload.single("audio"), async (req, res) => {
