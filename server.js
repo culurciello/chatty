@@ -1,0 +1,156 @@
+import dotenv from "dotenv";
+import express from "express";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+dotenv.config();
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const app = express();
+const port = Number(process.env.PORT || 3005);
+const host = process.env.HOST || "127.0.0.1";
+const openAiApiKey = process.env.OPENAI_API_KEY;
+const chatModel = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
+const speechModel = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
+const speechVoice = process.env.OPENAI_TTS_VOICE || "alloy";
+const systemPrompt =
+  process.env.SYSTEM_PROMPT ||
+  "You are a concise, helpful voice assistant. Reply conversationally and keep answers brief unless the user asks for more detail.";
+const startedAt = new Date().toISOString();
+
+function logEvent(stage, details = "") {
+  const suffix = details ? ` ${details}` : "";
+  console.log(`[${new Date().toISOString()}] ${stage}${suffix}`);
+}
+
+app.use(express.json({ limit: "2mb" }));
+app.use(express.static(path.join(__dirname, "public")));
+
+app.get("/api/health", (_req, res) => {
+  logEvent("health_check");
+  res.json({
+    ok: true,
+    configured: Boolean(openAiApiKey),
+    chatModel,
+    speechModel,
+    speechVoice
+  });
+});
+
+app.post("/api/voice-chat", async (req, res) => {
+  if (!openAiApiKey) {
+    logEvent("config_error", "OPENAI_API_KEY is missing");
+    return res.status(500).json({
+      error: "OPENAI_API_KEY is missing. Add it to .env before using the app."
+    });
+  }
+
+  const transcript = typeof req.body?.transcript === "string" ? req.body.transcript.trim() : "";
+  const history = Array.isArray(req.body?.history) ? req.body.history : [];
+
+  if (!transcript) {
+    logEvent("request_rejected", "empty transcript");
+    return res.status(400).json({ error: "Transcript is required." });
+  }
+
+  logEvent("listening_complete", `transcript="${transcript.slice(0, 120)}"`);
+  logEvent("processing_text", `history_items=${history.length}`);
+
+  const messages = [
+    { role: "system", content: systemPrompt },
+    ...history
+      .filter((item) => item && typeof item.role === "string" && typeof item.content === "string")
+      .slice(-12),
+    { role: "user", content: transcript }
+  ];
+
+  try {
+    logEvent("openai_chat_start", `model=${chatModel}`);
+    const chatResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${openAiApiKey}`
+      },
+      body: JSON.stringify({
+        model: chatModel,
+        messages,
+        temperature: 0.7
+      })
+    });
+
+    if (!chatResponse.ok) {
+      const errorText = await chatResponse.text();
+      logEvent("openai_chat_error", `status=${chatResponse.status}`);
+      return res.status(chatResponse.status).json({
+        error: "OpenAI chat request failed.",
+        details: errorText
+      });
+    }
+
+    const chatData = await chatResponse.json();
+    const assistantText = chatData?.choices?.[0]?.message?.content?.trim();
+
+    if (!assistantText) {
+      logEvent("openai_chat_error", "assistant text missing");
+      return res.status(502).json({
+        error: "OpenAI chat response did not contain assistant text."
+      });
+    }
+
+    logEvent("openai_chat_done", `assistant_chars=${assistantText.length}`);
+    logEvent("tts_start", `model=${speechModel} voice=${speechVoice}`);
+    const speechResponse = await fetch("https://api.openai.com/v1/audio/speech", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${openAiApiKey}`
+      },
+      body: JSON.stringify({
+        model: speechModel,
+        voice: speechVoice,
+        input: assistantText,
+        format: "mp3"
+      })
+    });
+
+    if (!speechResponse.ok) {
+      const errorText = await speechResponse.text();
+      logEvent("tts_error", `status=${speechResponse.status}`);
+      return res.status(speechResponse.status).json({
+        error: "OpenAI TTS request failed.",
+        details: errorText,
+        assistantText
+      });
+    }
+
+    const audioBuffer = Buffer.from(await speechResponse.arrayBuffer());
+    logEvent("tts_done", `audio_bytes=${audioBuffer.length}`);
+    logEvent("request_complete");
+
+    return res.json({
+      transcript,
+      assistantText,
+      audioBase64: audioBuffer.toString("base64"),
+      mimeType: "audio/mpeg"
+    });
+  } catch (error) {
+    logEvent(
+      "request_error",
+      error instanceof Error ? error.message : String(error)
+    );
+    return res.status(500).json({
+      error: "Unexpected server error.",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
+});
+
+app.listen(port, host, () => {
+  logEvent(
+    "server_ready",
+    `url=http://${host}:${port} started_at=${startedAt}`
+  );
+});
