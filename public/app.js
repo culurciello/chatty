@@ -12,7 +12,10 @@ const state = {
   mediaStream: null,
   recordedChunks: [],
   moonshineModule: null,
-  moonshineTranscriber: null
+  moonshineTranscriber: null,
+  transcribingChunk: false,
+  conversationMode: "push_to_talk",
+  autoResumeListening: false
 };
 
 const ui = {
@@ -25,7 +28,8 @@ const ui = {
   sendBtn: document.querySelector("#sendBtn"),
   stopAudioBtn: document.querySelector("#stopAudioBtn"),
   languageSelect: document.querySelector("#languageSelect"),
-  sttProviderSelect: document.querySelector("#sttProviderSelect")
+  sttProviderSelect: document.querySelector("#sttProviderSelect"),
+  conversationModeSelect: document.querySelector("#conversationModeSelect")
 };
 
 const languageConfig = {
@@ -88,10 +92,18 @@ function setState(nextState, detail = "") {
 
 function syncControls() {
   ui.micBtn.classList.toggle("active", state.listening);
-  ui.micBtn.title = state.listening ? "Release to stop" : "Hold to talk";
+  ui.micBtn.title =
+    state.conversationMode === "realtime"
+      ? state.listening
+        ? "Stop listening"
+        : "Start listening"
+      : state.listening
+        ? "Release to stop"
+        : "Hold to talk";
   ui.sendBtn.disabled = state.busy;
   ui.languageSelect.disabled = state.busy || state.listening;
   ui.sttProviderSelect.disabled = state.busy || state.listening;
+  ui.conversationModeSelect.disabled = state.busy || state.listening;
 }
 
 function currentLanguage() {
@@ -100,6 +112,22 @@ function currentLanguage() {
 
 function usingMoonshine() {
   return state.sttProvider === "moonshine";
+}
+
+function usingRealtimeMode() {
+  return state.conversationMode === "realtime";
+}
+
+function currentIdlePrompt() {
+  return usingRealtimeMode()
+    ? "Click the mic to start live listening, or type a message."
+    : currentLanguage().transcriptIdle;
+}
+
+function currentListeningPrompt() {
+  return usingRealtimeMode()
+    ? currentLanguage().transcriptListening.replace("... release to send.", "...")
+    : currentLanguage().transcriptListening;
 }
 
 function isTypingTarget(target) {
@@ -158,6 +186,13 @@ function stopPlayback() {
 }
 
 async function playAssistantAudio(audioBase64, mimeType) {
+  if (usingRealtimeMode() && state.listening) {
+    state.autoResumeListening = true;
+    await stopListening();
+  } else {
+    state.autoResumeListening = false;
+  }
+
   stopPlayback();
 
   const audio = new Audio(`data:${mimeType};base64,${audioBase64}`);
@@ -168,11 +203,15 @@ async function playAssistantAudio(audioBase64, mimeType) {
     if (state.activeAudio === audio) {
       state.activeAudio = null;
     }
-    if (state.listening) {
-      setState("listening", "listening");
-    } else {
-      setState("idle", "idle");
+    if (state.autoResumeListening) {
+      state.autoResumeListening = false;
+      void startListening().catch((error) => {
+        addBubble(describeMicError(error), "system");
+        setState("idle", "mic error");
+      });
+      return;
     }
+    setState("idle", "idle");
   });
 
   audio.addEventListener("error", () => {
@@ -180,6 +219,14 @@ async function playAssistantAudio(audioBase64, mimeType) {
       state.activeAudio = null;
     }
     addBubble("Audio playback failed in the browser.", "system");
+    if (state.autoResumeListening) {
+      state.autoResumeListening = false;
+      void startListening().catch((error) => {
+        addBubble(describeMicError(error), "system");
+        setState("idle", "mic error");
+      });
+      return;
+    }
     setState("idle", "audio error");
   });
 
@@ -256,7 +303,11 @@ async function ensureRecorder() {
 
   recorder.addEventListener("dataavailable", (event) => {
     if (event.data && event.data.size > 0) {
-      state.recordedChunks.push(event.data);
+      if (usingRealtimeMode()) {
+        void transcribeChunk(event.data);
+      } else {
+        state.recordedChunks.push(event.data);
+      }
     }
   });
 
@@ -322,43 +373,49 @@ async function teardownMoonshine() {
   state.moonshineTranscriber = null;
 }
 
-async function transcribeRecordedAudio() {
-  if (!state.recordedChunks.length) {
+async function transcribeChunk(audioBlob) {
+  if (!audioBlob || !audioBlob.size) {
     ui.liveTranscript.textContent = currentLanguage().transcriptIdle;
     return;
   }
 
-  const mimeType = state.mediaRecorder?.mimeType || "audio/webm";
-  const audioBlob = new Blob(state.recordedChunks, { type: mimeType });
-  state.recordedChunks = [];
-
-  if (!audioBlob.size) {
-    ui.liveTranscript.textContent = currentLanguage().transcriptIdle;
+  if (state.transcribingChunk) {
     return;
   }
 
-  setState("thinking", "transcribing");
+  state.transcribingChunk = true;
+  if (!state.busy) {
+    setState("thinking", "transcribing");
+  }
   ui.liveTranscript.textContent = "Transcribing...";
 
   const formData = new FormData();
   formData.append("audio", audioBlob, "speech.webm");
   formData.append("language", state.language);
 
-  const response = await fetch("/api/transcribe", {
-    method: "POST",
-    body: formData
-  });
-  const data = await response.json();
+  try {
+    const response = await fetch("/api/transcribe", {
+      method: "POST",
+      body: formData
+    });
+    const data = await response.json();
 
-  if (!response.ok) {
-    throw new Error(data?.details || data?.error || "Transcription failed.");
-  }
+    if (!response.ok) {
+      throw new Error(data?.details || data?.error || "Transcription failed.");
+    }
 
-  const transcript = typeof data?.transcript === "string" ? data.transcript.trim() : "";
-  ui.liveTranscript.textContent = transcript || currentLanguage().transcriptIdle;
-  ui.textInput.value = transcript;
-  if (transcript) {
-    await sendMessage(transcript);
+    const transcript = typeof data?.transcript === "string" ? data.transcript.trim() : "";
+    ui.liveTranscript.textContent = transcript || currentIdlePrompt();
+    ui.textInput.value = transcript;
+    if (transcript) {
+      await sendMessage(transcript);
+    }
+  } finally {
+    state.transcribingChunk = false;
+    if (usingRealtimeMode() && state.listening && !state.busy) {
+      setState("listening", "listening");
+      ui.liveTranscript.textContent = currentListeningPrompt();
+    }
   }
 }
 
@@ -374,13 +431,17 @@ async function startListening() {
     }
 
     state.recordedChunks = [];
-    recorder.start();
+    if (usingRealtimeMode()) {
+      recorder.start(2500);
+    } else {
+      recorder.start();
+    }
   }
 
   state.listening = true;
   syncControls();
   setState("listening", "listening");
-  ui.liveTranscript.textContent = currentLanguage().transcriptListening;
+  ui.liveTranscript.textContent = currentListeningPrompt();
 }
 
 async function stopListening() {
@@ -407,19 +468,49 @@ async function stopListening() {
 
   state.listening = false;
   syncControls();
-  if (!usingMoonshine()) {
-    await transcribeRecordedAudio();
+  if (!usingMoonshine() && !usingRealtimeMode()) {
+    const mimeType = state.mediaRecorder?.mimeType || "audio/webm";
+    const audioBlob = new Blob(state.recordedChunks, { type: mimeType });
+    state.recordedChunks = [];
+    await transcribeChunk(audioBlob);
   }
-  if (!state.busy && !state.activeAudio && !state.listening) {
+  if (!state.busy && !state.activeAudio) {
     setState("idle", "idle");
+    ui.liveTranscript.textContent = currentIdlePrompt();
   }
 }
 
-ui.micBtn.addEventListener("click", async () => {
-  // Click is intentionally ignored because the mic is press-and-hold.
+ui.micBtn.addEventListener("click", () => {
+  if (!usingRealtimeMode()) {
+    return;
+  }
+
+  ui.micBtn.disabled = true;
+  const work = async () => {
+    if (state.listening) {
+      await stopListening();
+    } else {
+      await startListening();
+    }
+  };
+
+  void work()
+    .catch((error) => {
+      addBubble(describeMicError(error), "system");
+      state.listening = false;
+      syncControls();
+      setState("idle", "mic error");
+    })
+    .finally(() => {
+      ui.micBtn.disabled = false;
+    });
 });
 
 ui.micBtn.addEventListener("pointerdown", async (event) => {
+  if (usingRealtimeMode()) {
+    return;
+  }
+
   event.preventDefault();
   if (state.micHeld) {
     return;
@@ -454,14 +545,23 @@ async function releaseMicHold() {
 }
 
 ui.micBtn.addEventListener("pointerup", () => {
+  if (usingRealtimeMode()) {
+    return;
+  }
   void releaseMicHold();
 });
 
 ui.micBtn.addEventListener("pointerleave", () => {
+  if (usingRealtimeMode()) {
+    return;
+  }
   void releaseMicHold();
 });
 
 ui.micBtn.addEventListener("pointercancel", () => {
+  if (usingRealtimeMode()) {
+    return;
+  }
   void releaseMicHold();
 });
 
@@ -511,6 +611,27 @@ ui.sttProviderSelect.addEventListener("change", async (event) => {
   syncControls();
 });
 
+ui.conversationModeSelect.addEventListener("change", async (event) => {
+  const nextMode = event.target.value === "realtime" ? "realtime" : "push_to_talk";
+  if (nextMode === state.conversationMode) {
+    return;
+  }
+
+  if (state.listening) {
+    await stopListening();
+  }
+
+  state.conversationMode = nextMode;
+  addBubble(
+    nextMode === "realtime"
+      ? "Mode switched to real-time free speech."
+      : "Mode switched to push to talk.",
+    "system"
+  );
+  ui.liveTranscript.textContent = currentIdlePrompt();
+  syncControls();
+});
+
 ui.textInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -520,6 +641,7 @@ ui.textInput.addEventListener("keydown", (event) => {
 
 document.addEventListener("keydown", (event) => {
   if (
+    usingRealtimeMode() ||
     event.code !== "Space" ||
     event.repeat ||
     event.altKey ||
@@ -546,7 +668,7 @@ document.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("keyup", (event) => {
-  if (event.code !== "Space" || isTypingTarget(event.target)) {
+  if (usingRealtimeMode() || event.code !== "Space" || isTypingTarget(event.target)) {
     return;
   }
 
@@ -560,9 +682,9 @@ document.addEventListener("keyup", (event) => {
 });
 
 addBubble(
-  "Hold space to talk. Choose Moonshine or gpt-4o-mini-transcribe for speech-to-text.",
+  "Choose push to talk or real-time free speech, and choose Moonshine or gpt-4o-mini-transcribe for speech-to-text.",
   "system"
 );
 setState("idle", "idle");
-ui.liveTranscript.textContent = currentLanguage().transcriptIdle;
+ui.liveTranscript.textContent = currentIdlePrompt();
 syncControls();
