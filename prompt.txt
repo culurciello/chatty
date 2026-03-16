@@ -1,6 +1,0 @@
-
-
-Using moonshine
-https://github.com/moonshine-ai/moonshine
-
-Create a node.js app that opens a website and allows to do a chat with an AI agent (use openAI API key) and uses STT and TTS to talk back forth to user in real time. 
