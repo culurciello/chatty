@@ -30,6 +30,8 @@ const supportedLanguages = {
 const upload = multer({ storage: multer.memoryStorage() });
 const realtimeTranscriptionModel =
   process.env.OPENAI_REALTIME_TRANSCRIBE_MODEL || "gpt-4o-mini-transcribe";
+const sonioxApiKey = process.env.SONIOX_API_KEY;
+const sonioxRealtimeModel = process.env.SONIOX_REALTIME_MODEL || "stt-rt-preview";
 
 function logEvent(stage, details = "") {
   const suffix = details ? ` ${details}` : "";
@@ -44,12 +46,62 @@ app.get("/api/health", (_req, res) => {
   res.json({
     ok: true,
     configured: Boolean(openAiApiKey),
+    sonioxConfigured: Boolean(sonioxApiKey),
     chatModel,
     transcriptionModel,
     realtimeTranscriptionModel,
+    sonioxRealtimeModel,
     speechModel,
     speechVoice
   });
+});
+
+app.post("/api/soniox-temporary-key", async (_req, res) => {
+  if (!sonioxApiKey) {
+    logEvent("config_error", "SONIOX_API_KEY is missing");
+    return res.status(500).json({
+      error: "SONIOX_API_KEY is missing. Add it to .env before using Soniox."
+    });
+  }
+
+  try {
+    logEvent("soniox_temp_key_start", `model=${sonioxRealtimeModel}`);
+    const response = await fetch("https://api.soniox.com/v1/auth/temporary-api-key", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${sonioxApiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        usage_type: "transcribe_websocket",
+        expires_in_seconds: 60
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) {
+      logEvent("soniox_temp_key_error", `status=${response.status}`);
+      return res.status(response.status).json({
+        error: "Failed to create Soniox temporary API key.",
+        details: data
+      });
+    }
+
+    logEvent("soniox_temp_key_ready");
+    return res.json({
+      apiKey: data?.api_key,
+      model: sonioxRealtimeModel
+    });
+  } catch (error) {
+    logEvent(
+      "soniox_temp_key_error",
+      error instanceof Error ? error.message : String(error)
+    );
+    return res.status(500).json({
+      error: "Unexpected Soniox temporary key error.",
+      details: error instanceof Error ? error.message : String(error)
+    });
+  }
 });
 
 app.post("/api/realtime-transcription-session", async (req, res) => {

@@ -15,6 +15,11 @@ const state = {
   recordedChunks: [],
   moonshineModule: null,
   moonshineTranscriber: null,
+  sonioxModule: null,
+  sonioxClient: null,
+  sonioxRecording: null,
+  sonioxUtteranceText: "",
+  sonioxSeenFinalTokenKeys: new Set(),
   transcribingChunk: false,
   pendingMessages: [],
   realtimePeerConnection: null,
@@ -103,12 +108,40 @@ function usingMoonshine() {
   return state.sttProvider === "moonshine";
 }
 
+function usingSoniox() {
+  return state.sttProvider === "soniox";
+}
+
 function usingRealtimeMode() {
   return state.conversationMode === "realtime";
 }
 
 function usingOpenAiRealtimeStt() {
-  return !usingMoonshine() && usingRealtimeMode();
+  return !usingMoonshine() && !usingSoniox() && usingRealtimeMode();
+}
+
+function extensionForMimeType(mimeType) {
+  if (!mimeType) {
+    return "webm";
+  }
+
+  if (mimeType.includes("webm")) {
+    return "webm";
+  }
+
+  if (mimeType.includes("ogg")) {
+    return "ogg";
+  }
+
+  if (mimeType.includes("mp4") || mimeType.includes("mpeg")) {
+    return "mp4";
+  }
+
+  if (mimeType.includes("wav")) {
+    return "wav";
+  }
+
+  return "bin";
 }
 
 function currentIdlePrompt() {
@@ -367,6 +400,122 @@ async function ensureMoonshineModule() {
   return state.moonshineModule;
 }
 
+async function ensureSonioxModule() {
+  if (state.sonioxModule) {
+    return state.sonioxModule;
+  }
+
+  state.sonioxModule = await import("https://esm.sh/@soniox/client");
+  return state.sonioxModule;
+}
+
+async function fetchSonioxTemporaryKey() {
+  const response = await fetch("/api/soniox-temporary-key", {
+    method: "POST"
+  });
+  const data = await response.json();
+
+  if (!response.ok) {
+    throw new Error(data?.details?.error_message || data?.error || "Failed to create Soniox key.");
+  }
+
+  if (!data?.apiKey) {
+    throw new Error("Soniox temporary key response did not include an api key.");
+  }
+
+  return data;
+}
+
+async function ensureSonioxClient() {
+  if (state.sonioxClient) {
+    return state.sonioxClient;
+  }
+
+  const { SonioxClient, BrowserPermissionResolver } = await ensureSonioxModule();
+  state.sonioxClient = new SonioxClient({
+    api_key: async () => {
+      const session = await fetchSonioxTemporaryKey();
+      return session.apiKey;
+    },
+    permissions: new BrowserPermissionResolver()
+  });
+
+  return state.sonioxClient;
+}
+
+function resetSonioxUtterance() {
+  state.sonioxUtteranceText = "";
+  state.sonioxSeenFinalTokenKeys = new Set();
+}
+
+function flushSonioxUtterance() {
+  const transcript = state.sonioxUtteranceText.trim();
+  resetSonioxUtterance();
+  if (transcript) {
+    ui.liveTranscript.textContent = transcript;
+    ui.textInput.value = transcript;
+    enqueueMessage(transcript);
+  }
+}
+
+function handleSonioxResult(result) {
+  let liveText = "";
+
+  for (const token of result?.tokens || []) {
+    if (!token?.text || token.text === "<end>") {
+      continue;
+    }
+
+    liveText += token.text;
+    if (token.is_final) {
+      const tokenKey = `${token.start_ms ?? ""}:${token.end_ms ?? ""}:${token.text}`;
+      if (!state.sonioxSeenFinalTokenKeys.has(tokenKey)) {
+        state.sonioxSeenFinalTokenKeys.add(tokenKey);
+        state.sonioxUtteranceText += token.text;
+      }
+    }
+  }
+
+  ui.liveTranscript.textContent = liveText || currentListeningPrompt();
+  ui.textInput.value = liveText;
+
+  if (result?.finished) {
+    flushSonioxUtterance();
+  }
+}
+
+async function ensureSonioxRecording() {
+  if (state.sonioxRecording) {
+    return state.sonioxRecording;
+  }
+
+  ui.liveTranscript.textContent = "Connecting Soniox...";
+  resetSonioxUtterance();
+  const client = await ensureSonioxClient();
+  const { model } = await fetchSonioxTemporaryKey();
+
+  const recording = await client.realtime.record({
+    model,
+    language_hints: [state.language],
+    enable_endpoint_detection: usingRealtimeMode()
+  });
+
+  recording.on("result", (result) => {
+    handleSonioxResult(result);
+  });
+
+  recording.on("endpoint", () => {
+    flushSonioxUtterance();
+  });
+
+  recording.on("error", (error) => {
+    addBubble(`Soniox error: ${error?.message || error}`, "system");
+  });
+
+  state.sonioxRecording = recording;
+  return recording;
+}
+
 async function ensureMoonshineTranscriber() {
   if (state.moonshineTranscriber) {
     return state.moonshineTranscriber;
@@ -413,6 +562,21 @@ async function teardownMoonshine() {
   state.moonshineTranscriber = null;
 }
 
+async function teardownSonioxRecording() {
+  if (!state.sonioxRecording) {
+    return;
+  }
+
+  try {
+    await state.sonioxRecording.stop();
+  } catch {
+    // Ignore stop errors during provider/language switching.
+  }
+
+  state.sonioxRecording = null;
+  flushSonioxUtterance();
+}
+
 async function transcribeChunk(audioBlob) {
   if (!audioBlob || !audioBlob.size || state.transcribingChunk) {
     return;
@@ -425,7 +589,8 @@ async function transcribeChunk(audioBlob) {
   ui.liveTranscript.textContent = "Transcribing...";
 
   const formData = new FormData();
-  formData.append("audio", audioBlob, "speech.webm");
+  const extension = extensionForMimeType(audioBlob.type);
+  formData.append("audio", audioBlob, `speech.${extension}`);
   formData.append("language", state.language);
 
   try {
@@ -616,6 +781,8 @@ async function startListening() {
   if (usingMoonshine()) {
     const transcriber = await ensureMoonshineTranscriber();
     await transcriber.start();
+  } else if (usingSoniox()) {
+    await ensureSonioxRecording();
   } else if (usingOpenAiRealtimeStt()) {
     await ensureOpenAiRealtimeConnection();
   } else {
@@ -639,6 +806,8 @@ async function stopListening() {
     if (state.moonshineTranscriber) {
       await state.moonshineTranscriber.stop();
     }
+  } else if (usingSoniox()) {
+    await teardownSonioxRecording();
   } else if (usingOpenAiRealtimeStt()) {
     await teardownOpenAiRealtimeConnection();
   } else {
@@ -781,6 +950,7 @@ ui.languageSelect.addEventListener("change", async (event) => {
 
   state.language = nextLanguage;
   await teardownMoonshine();
+  await teardownSonioxRecording();
   await teardownOpenAiRealtimeConnection();
   ui.liveTranscript.textContent = currentIdlePrompt();
   addBubble(`Language set to ${currentLanguage().label}.`, "system");
@@ -788,7 +958,12 @@ ui.languageSelect.addEventListener("change", async (event) => {
 });
 
 ui.sttProviderSelect.addEventListener("change", async (event) => {
-  const nextProvider = event.target.value === "moonshine" ? "moonshine" : "openai";
+  const nextProvider =
+    event.target.value === "moonshine"
+      ? "moonshine"
+      : event.target.value === "soniox"
+        ? "soniox"
+        : "openai";
   if (nextProvider === state.sttProvider) {
     return;
   }
@@ -799,11 +974,14 @@ ui.sttProviderSelect.addEventListener("change", async (event) => {
 
   state.sttProvider = nextProvider;
   await teardownMoonshine();
+  await teardownSonioxRecording();
   await teardownOpenAiRealtimeConnection();
 
   addBubble(
     nextProvider === "moonshine"
       ? "STT switched to Moonshine. Transcription runs in the browser."
+      : nextProvider === "soniox"
+        ? "STT switched to Soniox realtime transcription."
       : usingRealtimeMode()
         ? "STT switched to OpenAI Realtime transcription with VAD."
         : "STT switched to gpt-4o-mini-transcribe.",
@@ -824,10 +1002,11 @@ ui.conversationModeSelect.addEventListener("change", async (event) => {
   }
 
   state.conversationMode = nextMode;
+  await teardownSonioxRecording();
   await teardownOpenAiRealtimeConnection();
   addBubble(
     nextMode === "realtime"
-      ? usingMoonshine()
+      ? usingMoonshine() || usingSoniox()
         ? "Mode switched to real-time free speech."
         : "Mode switched to real-time free speech with OpenAI Realtime transcription + VAD."
       : "Mode switched to push to talk.",
@@ -887,7 +1066,7 @@ document.addEventListener("keyup", (event) => {
 });
 
 addBubble(
-  "Choose push to talk or real-time free speech. OpenAI real-time mode uses Realtime transcription + VAD.",
+  "Choose push to talk or real-time free speech. STT providers: OpenAI, Soniox, or Moonshine.",
   "system"
 );
 setState("idle", "idle");

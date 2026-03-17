@@ -6,6 +6,7 @@ A small Node.js app that opens a local website for voice chat.
 
 - Speech-to-text supports MoonshineJS in the browser.
 - OpenAI real-time mode uses Realtime transcription plus server VAD.
+- Soniox is available as an additional real-time STT provider.
 - The assistant reply is generated with the OpenAI Chat Completions API.
 - Text-to-speech uses the OpenAI speech API and plays the answer back in the browser.
 
@@ -35,5 +36,6 @@ A small Node.js app that opens a local website for voice chat.
 
 - `Mode: Real-time free speech` with `STT: gpt-4o-mini-transcribe` uses OpenAI Realtime transcription over WebRTC with VAD.
 - `Mode: Push to talk` with `STT: gpt-4o-mini-transcribe` uses chunked transcription uploads on release.
+- `STT: Soniox` uses a browser-side Soniox realtime session with temporary API keys minted by the Node server.
 - The first Moonshine start can take a few seconds while the browser downloads and initializes the local STT model.
 - If you want shorter or longer answers, change `SYSTEM_PROMPT` in `.env`.
