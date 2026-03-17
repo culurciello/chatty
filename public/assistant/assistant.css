@@ -1,0 +1,353 @@
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: "Inter", sans-serif;
+  color: #f3f6ff;
+  background:
+    radial-gradient(circle at top left, rgba(116, 185, 255, 0.18), transparent 22%),
+    radial-gradient(circle at top right, rgba(255, 131, 201, 0.16), transparent 18%),
+    linear-gradient(180deg, #060913 0%, #0b1020 100%);
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 30px 30px;
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.75), transparent);
+}
+
+.shell {
+  width: min(1380px, calc(100vw - 32px));
+  margin: 0 auto;
+  padding: 24px 0 48px;
+}
+
+.panel {
+  background: rgba(11, 16, 32, 0.78);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 24px;
+  backdrop-filter: blur(18px);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.32);
+  padding: 24px;
+}
+
+.hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  align-items: flex-start;
+  margin-bottom: 18px;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: #8fd8ff;
+  font-size: 0.72rem;
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  font-size: clamp(2.2rem, 4vw, 4rem);
+  line-height: 0.95;
+  margin-bottom: 12px;
+}
+
+h2 {
+  margin-bottom: 0;
+  font-size: 1.15rem;
+}
+
+.lede {
+  max-width: 60ch;
+  color: rgba(243, 246, 255, 0.72);
+}
+
+.meta {
+  display: grid;
+  gap: 12px;
+  min-width: 280px;
+}
+
+.meta-card {
+  padding: 14px 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.meta-card span,
+label span {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 0.78rem;
+  color: rgba(243, 246, 255, 0.65);
+}
+
+.ghost-link {
+  color: #dbe8ff;
+  text-decoration: none;
+  padding: 10px 14px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.top-panel {
+  margin-bottom: 18px;
+}
+
+.panel-header,
+.button-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.panel-header {
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 12px;
+  border-radius: 999px;
+  background: rgba(143, 216, 255, 0.14);
+  color: #bde9ff;
+  font-size: 0.82rem;
+}
+
+.chat-log {
+  display: grid;
+  gap: 12px;
+  max-height: 420px;
+  overflow: auto;
+}
+.chat-log { margin-bottom: 16px; }
+
+.message,
+.appointment-card {
+  border-radius: 18px;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.message.user {
+  background: rgba(135, 239, 172, 0.12);
+}
+
+.message.assistant {
+  background: rgba(125, 140, 255, 0.12);
+}
+
+.message.system {
+  background: rgba(255, 177, 106, 0.12);
+}
+
+.chat-form {
+  display: grid;
+  gap: 12px;
+}
+
+.text-field,
+.text-area,
+.language-select {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  color: #f3f6ff;
+  font: inherit;
+}
+
+button {
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  border-radius: 14px;
+  padding: 12px 16px;
+}
+
+.primary-button {
+  background: linear-gradient(135deg, #8fd8ff, #8794ff);
+  color: #04101a;
+  font-weight: 600;
+}
+
+.secondary-button {
+  background: rgba(255, 255, 255, 0.07);
+  color: #f3f6ff;
+}
+
+.appointment-card {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.appointment-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.appointment-meta {
+  font-size: 0.85rem;
+  color: rgba(243, 246, 255, 0.72);
+  margin-bottom: 10px;
+}
+
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.ledger {
+  display: grid;
+  gap: 10px;
+}
+
+.ledger-row {
+  display: grid;
+  grid-template-columns: minmax(160px, 1.2fr) minmax(150px, 1fr) minmax(120px, 0.9fr) minmax(150px, 1fr) minmax(150px, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.ledger-row.header {
+  background: rgba(143, 216, 255, 0.08);
+  color: #bde9ff;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.ledger-cell {
+  min-width: 0;
+  color: rgba(243, 246, 255, 0.82);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.day-column {
+  min-height: 320px;
+  border-radius: 20px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.day-heading {
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.day-heading strong {
+  display: block;
+}
+
+.day-heading span {
+  color: rgba(243, 246, 255, 0.62);
+  font-size: 0.85rem;
+}
+
+.empty-state {
+  color: rgba(243, 246, 255, 0.46);
+  font-size: 0.85rem;
+}
+
+.calendar-help {
+  margin: 8px 0 0;
+  color: rgba(243, 246, 255, 0.62);
+  font-size: 0.9rem;
+}
+
+.appointment-card {
+  cursor: pointer;
+}
+
+.editor-dialog {
+  border: 0;
+  padding: 0;
+  background: transparent;
+}
+
+.editor-dialog::backdrop {
+  background: rgba(3, 8, 18, 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.editor-card {
+  width: min(560px, calc(100vw - 24px));
+  display: grid;
+  gap: 12px;
+  padding: 24px;
+  border-radius: 24px;
+  background: rgba(11, 16, 32, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.4);
+}
+
+.close-button {
+  margin-left: auto;
+}
+
+@media (max-width: 1100px) {
+  .calendar-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ledger-row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .ledger-row.header {
+    display: none;
+  }
+}
+
+@media (max-width: 680px) {
+  .shell {
+    width: min(100vw - 20px, 100%);
+  }
+
+  .hero {
+    flex-direction: column;
+  }
+
+  .calendar-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ledger-row {
+    grid-template-columns: 1fr;
+  }
+}

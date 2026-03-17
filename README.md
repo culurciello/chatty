@@ -38,4 +38,5 @@ A small Node.js app that opens a local website for voice chat.
 - `Mode: Push to talk` with `STT: gpt-4o-mini-transcribe` uses chunked transcription uploads on release.
 - `STT: Soniox` uses a browser-side Soniox realtime session with temporary API keys minted by the Node server.
 - The first Moonshine start can take a few seconds while the browser downloads and initializes the local STT model.
+- Assistant scheduling data is now persisted locally in `data/assistant.sqlite`.
 - If you want shorter or longer answers, change `SYSTEM_PROMPT` in `.env`.

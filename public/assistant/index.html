@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Calendar Assistant</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/assistant/assistant.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero panel">
+        <div>
+          <p class="eyebrow">Assistant Workspace</p>
+          <h1>AI scheduling console</h1>
+          <p class="lede">
+            Book, move, or cancel appointments through the AI agent or directly in the
+            internal console. The weekly calendar below reflects the shared backend state.
+          </p>
+        </div>
+        <div class="meta">
+          <div class="meta-card">
+            <span>Worker</span>
+            <strong id="workerLabel">Loading...</strong>
+          </div>
+          <div class="meta-card">
+            <span>User</span>
+            <strong id="userLabel">Loading...</strong>
+          </div>
+          <a class="ghost-link" href="/">Back to main page</a>
+        </div>
+      </section>
+
+      <section class="panel top-panel">
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">AI Agent</p>
+            <h2>Scheduling chat</h2>
+          </div>
+          <span class="status-pill" id="assistantStatus">Ready</span>
+        </div>
+        <div class="chat-log" id="chatLog"></div>
+        <form class="chat-form" id="chatForm">
+          <textarea
+            id="chatInput"
+            class="text-area"
+            rows="3"
+            placeholder="Ask the assistant to book, move, or cancel an appointment..."
+          ></textarea>
+          <button class="primary-button" type="submit">Send</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Weekly Calendar</p>
+            <h2 id="calendarRange">This week</h2>
+            <p class="calendar-help">Click an event to edit it, or click an empty day to add a new appointment.</p>
+          </div>
+          <div class="button-row">
+            <button class="secondary-button" id="previousWeekButton" type="button">Previous</button>
+            <button class="secondary-button" id="todayButton" type="button">Today</button>
+            <button class="secondary-button" id="nextWeekButton" type="button">Next</button>
+          </div>
+        </div>
+        <div class="calendar-grid" id="calendarGrid"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">All Appointments</p>
+            <h2>Single-line ledger</h2>
+          </div>
+        </div>
+        <div class="ledger" id="appointmentLedger"></div>
+      </section>
+    </main>
+
+    <dialog class="editor-dialog" id="editorDialog">
+      <form class="editor-card" id="appointmentForm" method="dialog">
+        <div class="panel-header">
+          <div>
+            <p class="eyebrow">Calendar Editor</p>
+            <h2 id="formMode">Create appointment</h2>
+          </div>
+          <button class="secondary-button close-button" id="closeDialogButton" type="button">Close</button>
+        </div>
+        <input type="hidden" id="appointmentId" />
+        <label>
+          <span>Title</span>
+          <input id="titleInput" class="text-field" required />
+        </label>
+        <label>
+          <span>Start Date & Time (Year required)</span>
+          <input id="startInput" class="text-field" type="datetime-local" required />
+        </label>
+        <label>
+          <span>End Date & Time (Year required)</span>
+          <input id="endInput" class="text-field" type="datetime-local" required />
+        </label>
+        <label>
+          <span>Notes</span>
+          <textarea id="notesInput" class="text-area" rows="3"></textarea>
+        </label>
+        <div class="button-row">
+          <button class="primary-button" type="submit" id="saveButton">Save appointment</button>
+          <button class="secondary-button" type="button" id="deleteButton">Delete</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="/assistant/assistant.js"></script>
+  </body>
+</html>
